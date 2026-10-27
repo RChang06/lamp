@@ -1,0 +1,19 @@
+[Unit]
+Description=Lamp body: physics, servos and light
+Documentation=file:%LAMP_DIR%/deploy/README.md
+After=graphical-session.target
+
+[Service]
+Type=simple
+WorkingDirectory=%LAMP_DIR%
+# headless: the body renders nothing, so no gl stack and no display are needed
+ExecStart=%LAMP_DIR%/.venv/bin/python -m body.main --headless
+Restart=always
+RestartSec=2
+# the body is the real time half, so give it a little priority over the models
+Nice=-5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,22 @@
+[Unit]
+Description=Lamp character: perception, speech, memory and the director
+Documentation=file:%LAMP_DIR%/deploy/README.md
+After=lamp-body.service
+Wants=lamp-body.service
+
+[Service]
+Type=simple
+WorkingDirectory=%LAMP_DIR%
+ExecStart=%LAMP_DIR%/.venv/bin/python -m brain.main
+Restart=always
+RestartSec=3
+# the brain reconnects to the body on its own, so it may start first without harm
+Environment=PYTHONUNBUFFERED=1
+# put the key here, or leave it out entirely and the character asks what it is looking at
+# Environment=ANTHROPIC_API_KEY=
+# EnvironmentFile=-%LAMP_DIR%/deploy/lamp.env
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
