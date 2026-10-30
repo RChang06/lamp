@@ -1,32 +1,29 @@
-"""the microphone: voice activity detection, then transcription.
-
-energy gated vad with a hangover rather than a wake word, because the character already
-knows whether it is being looked at. visual attention is the gate, which is the whole
-point of a creature with a face: you look at it and talk, you do not say its name first.
-
-transcription is faster-whisper base.en int8 on cpu, measured at 0.66 s for 3.3 s of
-speech on the dev laptop. it runs on an utterance once the speaker stops, not streaming,
-because the director has nothing useful to do with a partial sentence and the cpu budget
-on the four core target is better spent elsewhere.
-"""
 from __future__ import annotations
 
+import os
 import queue
+import re
 import threading
 import time
 from dataclasses import dataclass
 
 import numpy as np
+import onnxruntime as ort
 import sounddevice as sd
 
-SR = 16000            # whisper wants 16 khz, so capture there and skip a resample
-BLOCK = 512           # 32 ms
-START_RMS = 0.018     # speech onset threshold
-STOP_RMS = 0.010      # lower than onset, so a trailing word does not cut the utterance
-START_BLOCKS = 4      # ~128 ms over threshold before we call it speech
-HANG = 0.70           # seconds of quiet that end an utterance
-MAX_UTTER = 12.0      # hard cap so a noisy room cannot grow an unbounded buffer
-PREROLL = 0.30        # seconds kept before onset, the first phoneme is always early
+SR = 16000
+BLOCK = 512
+VAD_MODEL = "models/silero_vad_16k_op15.onnx"
+WHISPER_DIR = "models/whisper"
+START_PROB = 0.5
+STOP_PROB = 0.35
+FLOOR_RMS = 0.004
+START_BLOCKS = 5
+START_RMS = FLOOR_RMS * 4
+STOP_RMS = FLOOR_RMS
+HANG = 0.70
+MAX_UTTER = 12.0
+PREROLL = 0.30
 
 
 @dataclass
@@ -41,15 +38,41 @@ class Utterance:
         return len(self.audio) / SR
 
 
-class Ears:
-    """captures utterances continuously and hands them over whole."""
+class SileroVAD:
+    def __init__(self, path: str = VAD_MODEL):
+        opts = ort.SessionOptions()
+        opts.intra_op_num_threads = 1
+        opts.inter_op_num_threads = 1
+        self.session = ort.InferenceSession(path, sess_options=opts,
+                                            providers=["CPUExecutionProvider"])
+        self.sr = np.array(SR, dtype=np.int64)
+        self.reset()
 
+    def reset(self) -> None:
+        self.state = np.zeros((2, 1, 128), dtype=np.float32)
+        self.context = np.zeros((1, 64), dtype=np.float32)
+
+    def __call__(self, block: np.ndarray) -> float:
+        chunk = block.reshape(1, -1).astype(np.float32)
+        if chunk.shape[1] != BLOCK:
+            chunk = np.pad(chunk, ((0, 0), (0, max(0, BLOCK - chunk.shape[1]))))[:, :BLOCK]
+        prob, state = self.session.run(None, {
+            "input": np.concatenate((self.context, chunk), axis=1),
+            "state": self.state, "sr": self.sr})
+        self.state = np.asarray(state, dtype=np.float32)
+        self.context = chunk[:, -64:].copy()
+        return float(np.asarray(prob).item())
+
+
+class Ears:
     def __init__(self, device=None):
         self.utterances: queue.Queue[Utterance] = queue.Queue()
-        self.level = 0.0            # smoothed input level, for the ui and for barge in
-        self.speaking = False       # someone is talking right now
-        self.enabled = True         # can be muted entirely
-        self.boost = 1.0            # onset threshold multiplier, raised while it speaks
+        self.level = 0.0
+        self.speaking = False
+        self.enabled = True
+        self.boost = 1.0
+        self.prob = 0.0
+        self.vad = SileroVAD()
         self._buf: list[np.ndarray] = []
         self._pre: list[np.ndarray] = []
         self._loud = 0
@@ -81,13 +104,15 @@ class Ears:
             self.speaking = False
             return
 
-        # a short rolling pre-roll so the utterance does not start mid word
         self._pre.append(mono)
         if len(self._pre) > int(PREROLL * SR / BLOCK):
             self._pre.pop(0)
 
+        self.prob = self.vad(mono)
+        start_prob = min(0.9, START_PROB + 0.15 * (self.boost - 1.0))
         if not self.speaking:
-            self._loud = self._loud + 1 if rms > START_RMS * self.boost else 0
+            is_speech = self.prob >= start_prob and rms > FLOOR_RMS * self.boost
+            self._loud = self._loud + 1 if is_speech else 0
             if self._loud >= START_BLOCKS:
                 self.speaking = True
                 self._started = now
@@ -98,7 +123,7 @@ class Ears:
 
         with self.lock:
             self._buf.append(mono)
-        if rms > STOP_RMS:
+        if self.prob >= STOP_PROB and rms > FLOOR_RMS:
             self._last_loud = now
         too_long = now - self._started > MAX_UTTER
         if now - self._last_loud > HANG or too_long:
@@ -107,7 +132,7 @@ class Ears:
                 self._buf = []
             self.speaking = False
             self._loud = 0
-            if len(audio) > int(0.25 * SR):      # ignore coughs and door clicks
+            if len(audio) > int(0.25 * SR):
                 self.utterances.put(Utterance(audio, self._started, now,
                                               float(np.sqrt(np.mean(audio ** 2)))))
 
@@ -122,12 +147,52 @@ class Ears:
             pass
 
 
-class Transcriber:
-    """faster-whisper in a worker thread, so a 0.7 s transcribe never stalls the director."""
+MAX_TOKENS_PER_S = 8
+MAX_WORDS_PER_S = 5.0
+PROMPT = "Talking to a small desk lamp robot."
+ASR_ENGINE = os.environ.get("LAMP_ASR", "parakeet")
+PARAKEET = "nemo-parakeet-tdt-0.6b-v2"
+PARAKEET_DIR = "models/parakeet-int8"
+PARAKEET_FP32_DIR = "models/parakeet"
 
-    def __init__(self, size: str = "base.en"):
-        from faster_whisper import WhisperModel
-        self.model = WhisperModel(size, device="cpu", compute_type="int8")
+
+def lean_session() -> ort.SessionOptions:
+    opts = ort.SessionOptions()
+    opts.intra_op_num_threads = 4
+    opts.inter_op_num_threads = 1
+    opts.add_session_config_entry("session.intra_op.allow_spinning", "0")
+    return opts
+
+
+def hallucinated(seg) -> bool:
+    return seg.no_speech_prob > 0.6 and seg.avg_logprob < -1.0
+
+
+FIXES = [(re.compile(r"\blamb\b", re.I), "lamp")]
+
+
+class Transcriber:
+    def __init__(self, size: str = "base.en", keep_dir: str | None = None,
+                 engine: str = ASR_ENGINE):
+        self.keep_dir = keep_dir
+        self.engine = engine
+        self.model = None
+        if engine.startswith("parakeet"):
+            try:
+                import onnx_asr
+                fp32 = engine == "parakeet-fp32"
+                self.model = onnx_asr.load_model(
+                    PARAKEET, PARAKEET_FP32_DIR if fp32 else PARAKEET_DIR,
+                    quantization=None if fp32 else "int8", sess_options=lean_session())
+            except Exception as exc:
+                print(f"parakeet unavailable ({type(exc).__name__}: {exc}), using whisper",
+                      flush=True)
+                self.engine = "whisper"
+        if self.model is None:
+            from faster_whisper import WhisperModel
+            self.engine = f"whisper {size}"
+            self.model = WhisperModel(size, device="cpu", compute_type="int8",
+                                      download_root=WHISPER_DIR)
         self.jobs: queue.Queue = queue.Queue()
         self.results: queue.Queue = queue.Queue()
         self.times: list[float] = []
@@ -140,13 +205,41 @@ class Transcriber:
         while True:
             utt = self.jobs.get()
             t0 = time.perf_counter()
-            segs, _ = self.model.transcribe(utt.audio, beam_size=1, language="en",
-                                            condition_on_previous_text=False)
-            text = " ".join(s.text for s in segs).strip()
+            if self.engine.startswith("parakeet"):
+                text = self.model.recognize(utt.audio, sample_rate=SR).strip()
+            else:
+                # whisper hallucinates on noise, cap the tokens
+                budget = int(utt.seconds * MAX_TOKENS_PER_S) + 8
+                segs, _ = self.model.transcribe(utt.audio, beam_size=1, language="en",
+                                                condition_on_previous_text=False,
+                                                without_timestamps=True,
+                                                max_new_tokens=budget,
+                                                initial_prompt=PROMPT)
+                kept = [s for s in segs if not hallucinated(s)]
+                text = " ".join(s.text for s in kept).strip()
+            for pattern, word in FIXES:
+                text = pattern.sub(word, text)
+            if len(text.split()) > utt.seconds * MAX_WORDS_PER_S + 3:
+                text = ""
             dt = time.perf_counter() - t0
             self.times.append(dt)
+            if self.keep_dir:
+                self._keep(utt, text)
             self.results.put({"text": text, "utterance": utt, "stt_s": dt,
                               "rtf": dt / max(utt.seconds, 1e-3)})
+
+    def _keep(self, utt: Utterance, text: str) -> None:
+        import json
+        import wave
+        os.makedirs(self.keep_dir, exist_ok=True)
+        name = time.strftime("%Y%m%d-%H%M%S") + f"-{int(utt.started * 1000) % 1000:03d}.wav"
+        with wave.open(os.path.join(self.keep_dir, name), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(SR)
+            w.writeframes((np.clip(utt.audio, -1, 1) * 32767).astype(np.int16).tobytes())
+        with open(os.path.join(self.keep_dir, "transcripts.jsonl"), "a") as f:
+            f.write(json.dumps({"wav": name, "text": text, "seconds": round(utt.seconds, 2)}) + "\n")
 
     def poll(self) -> dict | None:
         try:
