@@ -96,9 +96,4 @@ it recognises. What it loses is naming objects it has not been told about, and t
 looks, says it cannot tell, and asks. The answer is stored from speech, and every later
 question about that object works identically.
 
-## Licensing
 
-The supplied URDF and mesh are unmodified. `piper-tts` 1.8.0 is GPL-3.0-or-later (the
-MIT `rhasspy/piper` was archived in October 2025 and `pip install piper-tts` now resolves
-to `OHF-Voice/piper1-gpl`). MediaPipe is Apache-2.0, faster-whisper and CTranslate2 are
-MIT, MuJoCo is Apache-2.0. No Ultralytics YOLO anywhere, since it is AGPL-3.0.
