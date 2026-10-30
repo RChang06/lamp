@@ -1,6 +1,10 @@
 # Lamp
 
-**Demo video:** [media/demo.mp4](media/demo.mp4) (87 s, one continuous take)
+**Demo video:** 
+
+https://github.com/user-attachments/assets/8571004c-f0f9-4acc-8ba7-d6a66ac3a7f1
+
+(87 s, one continuous take)
 
 Needs `ANTHROPIC_API_KEY` for conversation and object vision. Without it, it still runs in
 local mode: it notices you, follows you, listens, handles simple commands and sleeps.
