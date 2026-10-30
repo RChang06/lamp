@@ -1,20 +1,16 @@
 #!/usr/bin/env bash
-# install on a clean ubuntu 24.04 laptop. idempotent, safe to re-run.
-#
-# the gl packages are only needed if you want the mujoco viewer. the deployed units run
-# the body with --headless, which renders nothing and needs no gl at all.
+# usage: [WANT_VIEWER=0] sudo ./deploy/install.sh
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 USER_NAME="${SUDO_USER:-$USER}"
-WANT_VIEWER="${WANT_VIEWER:-0}"
+WANT_VIEWER="${WANT_VIEWER:-1}"
 
 echo "installing lamp into $HERE for user $USER_NAME"
 
-# ---- apt ---------------------------------------------------------------------------
-PKGS=(libportaudio2 libgomp1 v4l-utils ca-certificates curl)
+PKGS=(libportaudio2 libgomp1 libglib2.0-0 v4l-utils ca-certificates curl)
 if [ "$WANT_VIEWER" = "1" ]; then
-  PKGS+=(libgl1 libglx-mesa0 libegl1 libxinerama1 libxcursor1 libxi6)
+  PKGS+=(libgl1 libglx-mesa0 libegl1 libxinerama1 libxcursor1 libxi6 libxrandr2 libxkbcommon0)
 fi
 if [ "$(id -u)" -eq 0 ]; then
   apt-get update -qq
@@ -23,7 +19,6 @@ else
   echo "not root, skipping apt. needed packages: ${PKGS[*]}"
 fi
 
-# ---- device access -------------------------------------------------------------------
 for grp in audio video; do
   if ! id -nG "$USER_NAME" | tr ' ' '\n' | grep -qx "$grp"; then
     echo "adding $USER_NAME to $grp (log out and back in for this to take effect)"
@@ -31,7 +26,11 @@ for grp in audio video; do
   fi
 done
 
-# ---- uv and the environment ----------------------------------------------------------
+if [ "$(id -u)" -eq 0 ] && [ "$USER_NAME" != "root" ]; then
+  echo "continuing as $USER_NAME"
+  exec sudo -u "$USER_NAME" -H env WANT_VIEWER="$WANT_VIEWER" bash "$HERE/deploy/install.sh"
+fi
+
 if ! command -v uv >/dev/null 2>&1; then
   echo "installing uv"
   curl -fsSL https://astral.sh/uv/install.sh | sh
@@ -41,33 +40,14 @@ fi
 cd "$HERE"
 uv sync --frozen
 
-# opencv only captures and encodes here, it never opens a window, so the headless wheel
-# is the right one on a server or a fixture: smaller, and no gtk dependency chain
 if [ "$WANT_VIEWER" != "1" ]; then
   echo "swapping opencv for the headless wheel"
   uv pip uninstall opencv-python >/dev/null 2>&1 || true
   uv pip install --quiet opencv-python-headless
 fi
 
-# ---- models ---------------------------------------------------------------------------
-mkdir -p models/piper
-fetch() {  # url, destination
-  if [ -s "$2" ]; then echo "  have $(basename "$2")"; return; fi
-  echo "  fetching $(basename "$2")"
-  curl -fsSL "$1" -o "$2"
-}
-echo "models:"
-fetch "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task" \
-      models/face_landmarker.task
-BASE="https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium"
-fetch "$BASE/en_US-lessac-medium.onnx" models/piper/en_US-lessac-medium.onnx
-fetch "$BASE/en_US-lessac-medium.onnx.json" models/piper/en_US-lessac-medium.onnx.json
+uv run python tools/fetch_models.py
 
-# whisper downloads itself on first use, so warm it here rather than during a demo
-echo "warming whisper base.en int8"
-uv run python -c "from faster_whisper import WhisperModel; WhisperModel('base.en', device='cpu', compute_type='int8')"
-
-# ---- checks ---------------------------------------------------------------------------
 echo
 echo "checking devices"
 uv run python - <<'PY'
@@ -90,8 +70,9 @@ PY
 
 echo
 echo "done. to run it:"
-echo "  uv run python -m body.main --headless      # or without --headless for the viewer"
-echo "  uv run python -m brain.main"
+echo "  ./deploy/run.sh            # body with the viewer, brain with the debug window"
+echo "  HEADLESS=1 ./deploy/run.sh # no windows at all"
+echo "optional: export ANTHROPIC_API_KEY=... first, for conversation and object vision"
 echo
 echo "or install the user services:"
 echo "  mkdir -p ~/.config/systemd/user"

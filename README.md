@@ -9,10 +9,20 @@ judged. The brain runs without the body too, and says so rather than failing.
 
 ## Quick start
 
+On Ubuntu 24.04 (the target), see [deploy/README.md](deploy/README.md) for details:
+
 ```bash
-uv sync
+sudo ./deploy/install.sh            # apt packages, uv, the environment, every model
+export ANTHROPIC_API_KEY=...        # optional: conversation and object vision
+./deploy/run.sh                     # body + brain, with the viewer and the debug window
+```
+
+Anywhere else with [uv](https://docs.astral.sh/uv/):
+
+```bash
+uv sync && uv run python tools/fetch_models.py
 uv run python -m body.main          # the body, with the viewer
-uv run python -m brain.main         # the character, in another terminal
+uv run python -m brain.main --debug # the character, in another terminal
 ```
 
 Everything below runs with no camera, microphone or network.
@@ -67,7 +77,9 @@ part, so a plan cannot lose the `observe` step that verifies it before claiming 
 | Variable | Default | What |
 |---|---|---|
 | `ANTHROPIC_API_KEY` | unset | enables the vision and planning call. unset is a supported mode |
-| `LAMP_MODEL` | `claude-opus-5-5` | the model for that one call |
+| `LAMP_MODEL` | `claude-opus-5-5` | the model for the one call per turn. `claude-haiku-5-5` answers in about a second, with weaker vision and planning |
+| `LAMP_ASR` | `parakeet` | speech recognition: `parakeet` (int8, 0.7 GB), `parakeet-fp32` (more accurate, 2.6 GB) or `whisper` |
+| `LAMP_VOICE` | `af_heart` | a Kokoro voice name, or `piper` for the faster, more robotic fallback |
 | `LAMP_EFFORT` | `low` | a plan is short, so latency is the thing worth buying |
 
 With no key, the character still engages, converses, remembers and carries out the goals

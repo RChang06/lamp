@@ -3,3 +3,6 @@ models/
 __pycache__/
 scratch/
 run/
+.env
+.env.*
+*.key
