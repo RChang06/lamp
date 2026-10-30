@@ -42,6 +42,14 @@
   .hint { color: var(--dim); font-size: 12px; margin-top: 9px; }
   #log { font: 12px/1.5 ui-monospace, "Cascadia Code", monospace; color: var(--dim);
          height: 112px; overflow-y: auto; white-space: pre-wrap; }
+  #follow { position: relative; height: 190px; border: 1px dashed #434856; border-radius: 8px;
+            background: #181a20; cursor: crosshair; overflow: hidden; }
+  #follow.on { border-color: var(--accent); }
+  #follow .dot { position: absolute; width: 14px; height: 14px; margin: -7px 0 0 -7px;
+                 border-radius: 50%; pointer-events: none; }
+  #f-cursor { background: var(--accent); opacity: .85; }
+  #f-aim { border: 2px solid var(--live); }
+  #follow .cross { position: absolute; background: #2a2d36; pointer-events: none; }
 </style>
 </head>
 <body>
@@ -66,6 +74,18 @@
     <div class="row"><label>azimuth</label><input id="az" type="range" min="-1.4" max="1.4" step="0.02" value="0"><span class="val" id="azv">0.00</span></div>
     <div class="row"><label>elevation</label><input id="el" type="range" min="-1.0" max="0.8" step="0.02" value="0"><span class="val" id="elv">0.00</span></div>
     <div class="hint">radians. positive azimuth is its own left, positive elevation is up.</div>
+  </div>
+
+  <div class="card">
+    <h2>follow the mouse</h2>
+    <div id="follow">
+      <div class="cross" style="left:0;right:0;top:50%;height:1px"></div>
+      <div class="cross" style="top:0;bottom:0;left:50%;width:1px"></div>
+      <div class="dot" id="f-cursor" style="display:none"></div>
+      <div class="dot" id="f-aim"></div>
+    </div>
+    <div class="hint">hover to make it watch the cursor, as if the lamp faces you through the
+      screen. yellow is where you point, green ring is where its head actually aims.</div>
   </div>
 
   <div class="card">
@@ -150,7 +170,34 @@ function connect() {
   };
 }
 
+const F_AZ = 1.2, F_EL_UP = 0.6, F_EL_DOWN = -0.7;
+let lastFollow = 0;
+function followToBox(az, el) {
+  const x = 0.5 + az / (2 * F_AZ);
+  const y = el >= 0 ? 0.5 - 0.5 * el / F_EL_UP : 0.5 + 0.5 * el / F_EL_DOWN;
+  return [Math.min(1, Math.max(0, x)) * 100, Math.min(1, Math.max(0, y)) * 100];
+}
+$("follow").addEventListener("mousemove", (e) => {
+  const r = $("follow").getBoundingClientRect();
+  const x = (e.clientX - r.left) / r.width, y = (e.clientY - r.top) / r.height;
+  const c = $("f-cursor");
+  c.style.display = "block"; c.style.left = x * 100 + "%"; c.style.top = y * 100 + "%";
+  const now = performance.now();
+  if (now - lastFollow < 33) return;   // ~30 looks per second is plenty
+  lastFollow = now;
+  const az = (x - 0.5) * 2 * F_AZ;
+  const el = y < 0.5 ? (0.5 - y) * 2 * F_EL_UP : (y - 0.5) * 2 * F_EL_DOWN;
+  $("az").value = az; $("el").value = el; showSliders();
+  send({ cmd: "look", az: +az.toFixed(3), el: +el.toFixed(3), weight: 1.0 });
+});
+$("follow").addEventListener("mouseenter", () => $("follow").classList.add("on"));
+$("follow").addEventListener("mouseleave", () => {
+  $("follow").classList.remove("on"); $("f-cursor").style.display = "none";
+});
+
 function telemetry(m) {
+  const [ax, ay] = followToBox(m.aim.az, m.aim.el);
+  $("f-aim").style.left = ax + "%"; $("f-aim").style.top = ay + "%";
   $("t-posture").textContent = m.posture;
   $("t-aim").textContent = m.aim.az.toFixed(3) + ", " + m.aim.el.toFixed(3);
   $("t-cmd").textContent = m.aim_cmd.az.toFixed(3) + ", " + m.aim_cmd.el.toFixed(3);
@@ -170,7 +217,6 @@ function telemetry(m) {
   }
 }
 
-// build the buttons
 for (const p of POSTURES) {
   const b = document.createElement("button");
   b.textContent = p; b.id = "p-" + p;
@@ -217,7 +263,6 @@ $("int").oninput = light;
 $("warm").oninput = light;
 $("pulse").oninput = light;
 
-// a speech shaped envelope, so the head bob and the bulb can be judged without tts
 async function fakeSpeech(seconds = 3.0) {
   send({ cmd: "posture", name: "speak" });
   log("fake speech " + seconds.toFixed(1) + "s");
@@ -233,7 +278,6 @@ async function fakeSpeech(seconds = 3.0) {
 }
 $("speak").onclick = () => fakeSpeech(3.2);
 
-// the same tour the terminal puppet runs
 const TOUR = [
   [0, { cmd: "posture", name: "sleep" }], [1500, { cmd: "light", intensity: 0.1 }],
   [4000, { cmd: "posture", name: "alert" }], [4050, { cmd: "gesture", name: "perk" }],

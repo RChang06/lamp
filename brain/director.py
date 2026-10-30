@@ -1,17 +1,3 @@
-"""the director: four states, and the edges between them are where the character lives.
-
-    idle      lowered, dim, breathing slowly, drifting
-    engaged   up, bright, tracking the face
-    listening held still, light steady, neck offered toward the speaker
-    speaking  moving and glowing with its own voice
-
-recalling is not a state. looking something up is part of composing a reply, not a way of
-being, and making it a state only produces a mode the character can get stuck in.
-
-the acknowledgement lives on the idle to engaged edge rather than in a state, so it fires
-once per arrival. the thresholds are asymmetric on purpose, 0.4 s to notice and 2.0 s to
-let go, because equal thresholds flicker at the boundary and flicker reads as broken.
-"""
 from __future__ import annotations
 
 import asyncio
@@ -26,16 +12,35 @@ from brain.audio import SFX, AudioOut, music_bed
 from brain.memory import Observation, SceneMemory
 from common import actions as A
 
-IDLE, ENGAGED, LISTENING, SPEAKING = "idle", "engaged", "listening", "speaking"
+ASLEEP, IDLE, ENGAGED, LISTENING, THINKING, SPEAKING = (
+    "asleep", "idle", "engaged", "listening", "thinking", "speaking")
 
-GREETINGS = ["Oh, hello.", "Hey there.", "There you are.", "Well, hello."]
 FAREWELLS = ["See you.", "Goodnight.", "I will be here."]
 IDENTITY = "I am a lamp, mostly. I watch, I listen, and I try to be useful."
 NO_MEMORY = "I do not think I have seen that yet."
 QUESTION = re.compile(r"^(what|where|who|why|how|did|do|does|can|could|is|are|was)|\?",
                       re.I)
-LISTEN_TIMEOUT = 6.0        # give up waiting for speech and go back to just being present
-IDLE_DRIFT = 11.0           # seconds between idle glances, so it is never a statue
+LISTEN_TIMEOUT = 6.0
+IDLE_DRIFT = 11.0
+DOZE_AFTER = 30.0
+WAKE_DWELL = 0.5
+WAKE_STRETCH = 1.6
+
+GLANCE_IGNORE = 0.5
+DISTRACT_DISENGAGE = 2.0
+CONVO_DISENGAGE = 4.0
+CONVO_WINDOW = 8.0
+REGREET_QUIET = 5.0
+REGREET_FULL = 60.0
+LOST_HOLD = 2.0
+TALK_TO_EMPTY = 1.5
+THINK_SOUND_AFTER = 0.8
+THINK_TIMEOUT = 15.0
+HISTORY_TURNS = 4
+TURN_GESTURES = {"nod", "shake", "perk", "droop", "flash", "startle"}
+LOOK_DEADBAND = 0.03
+FOLLOW_GAIN = 1.6
+FOLLOW_EL_CENTRE = 0.22
 
 
 class Director:
@@ -50,7 +55,7 @@ class Director:
         self.memory = memory
         self.planner = plan
         self.cloud = cloud
-        self.quiet = quiet           # suppress the music bed, for a quiet room or a test
+        self.quiet = quiet
 
         self.state = IDLE
         self.since = time.time()
@@ -58,12 +63,25 @@ class Director:
         self.last_drift = 0.0
         self.drift_az = 0.0
         self.music_on = False
+        self.last_face = time.time()
+        self.face_since: float | None = None
+        self.woke_at = 0.0
+        self.wake_armed = True
+        self.last_looking = 0.0
+        self.soft_distracted = False
+        self.engaged_until = -1e9
+        self.last_talk = -1e9
+        self.gone_since: float | None = None
+        self.sent_look: tuple[float, float, float] | None = None
+        self.speech_addressed = False
+        self.was_speaking = False
         self.log: list[tuple[float, str]] = []
         self.latency: list[tuple[str, float]] = []
         self.heard: list[str] = []
+        self.history: list[tuple[str, str]] = []
+        self.think_sound = False
         self.t0 = time.time()
 
-    # ---- bookkeeping -----------------------------------------------------------------
     def note(self, line: str) -> None:
         self.log.append((time.time() - self.t0, line))
         print(f"[{time.time() - self.t0:6.1f}s] {line}", flush=True)
@@ -72,8 +90,11 @@ class Director:
         if state == self.state:
             return
         self.note(f"{self.state} -> {state}")
+        if self.state == THINKING:
+            self.link.light(pulse=0.0)
         self.state = state
         self.since = time.time()
+        self.think_sound = False
 
     @property
     def busy(self) -> bool:
@@ -84,7 +105,6 @@ class Director:
             return
         self.job = asyncio.create_task(coro)
 
-    # ---- sound -----------------------------------------------------------------------
     def sfx(self, name: str) -> None:
         if name in SFX:
             self.audio.play(f"sfx_{name}", SFX[name](), gain=0.8)
@@ -102,75 +122,189 @@ class Director:
             return
         self.note(f'say: "{text}"')
         self.voice.say(text)
+        self.last_talk = time.time()
         self.go(SPEAKING)
 
-    # ---- the edges -------------------------------------------------------------------
+    def in_conversation(self, now: float) -> bool:
+        return now - self.last_talk < CONVO_WINDOW
+
+    def look_at_person(self, look, weight: float) -> None:
+        if self.sent_look is not None:
+            az, el, w = self.sent_look
+            if abs(az - look.az) < LOOK_DEADBAND and abs(el - look.el) < LOOK_DEADBAND \
+                    and abs(w - weight) < 0.05:
+                return
+        az = max(-1.3, min(1.3, look.az * FOLLOW_GAIN))
+        el = FOLLOW_EL_CENTRE + (look.el - FOLLOW_EL_CENTRE) * FOLLOW_GAIN
+        self.link.look(az, el, weight)
+        self.sent_look = (look.az, look.el, weight)
+
     def engage(self) -> None:
-        self.sfx("chirp_up")
+        away = time.time() - self.engaged_until
         self.link.posture("alert")
-        self.link.gesture("perk")
         self.music(True)
         self.go(ENGAGED)
-        self.say(random.choice(GREETINGS))
+        self.soft_distracted = False
+        if away < REGREET_QUIET:
+            self.note(f"back after {away:.1f}s, carrying on")
+        elif away < REGREET_FULL:
+            self.note(f"back after {away:.0f}s, a nod")
+            self.sfx("blip")
+            self.link.gesture("nod", amp=0.6)
+        else:
+            self.note("hello, without words")
+            self.sfx("chirp_up")
+            self.link.gesture("perk")
+            self.link.light(intensity=1.0)
 
-    def disengage(self) -> None:
+    def disengage(self, why: str = "looked away") -> None:
+        self.note(f"disengage: {why}")
         self.sfx("chirp_down")
         self.link.gesture("droop", amp=0.8)
         self.link.posture("idle")
         self.music(False)
         self.voice.cancel()
+        self.engaged_until = time.time()
+        self.soft_distracted = False
         self.go(IDLE)
 
-    # ---- the loop --------------------------------------------------------------------
+    def think(self) -> None:
+        self.link.posture("think")
+        self.link.light(pulse=0.45)
+        self.go(THINKING)
+
+    def doze(self, armed: bool = True) -> None:
+        self.link.gesture("droop", amp=1.0)
+        self.link.posture("sleep")
+        self.music(False)
+        self.voice.cancel()
+        self.wake_armed = armed
+        self.go(ASLEEP)
+
+    def wake(self, why: str) -> None:
+        self.note(f"waking: {why}")
+        self.sfx("blip")
+        self.link.posture("idle")
+        self.link.gesture("perk", amp=1.2)
+        self.ears.drain()
+        self.woke_at = time.time()
+        self.last_face = time.time()
+        self.go(IDLE)
+
     async def tick(self) -> None:
         look = self.vision.look
         now = time.time()
-
-        # gaze: follow the face whenever there is one, whatever state we are in
         if look.present:
-            weight = 1.0 if look.attending else 0.55
-            self.link.look(look.az, look.el, weight)
-        elif self.state == IDLE and now - self.last_drift > IDLE_DRIFT:
-            # a slow glance somewhere else, the cheapest possible sign of being alive
+            self.last_face = now
+            if self.face_since is None:
+                self.face_since = now
+        else:
+            self.face_since = None
+
+        if self.state == ASLEEP:
+            if not look.present:
+                self.wake_armed = True
+            elif self.wake_armed and now - self.face_since >= WAKE_DWELL:
+                self.wake("face")
+            if self.ears.speaking and self.wake_armed:
+                self.wake("voice")
+            return
+
+        looking = getattr(look, "looking", look.attending)
+        if looking:
+            self.last_looking = now
+        away_for = now - self.last_looking
+        if look.present:
+            self.gone_since = None
+        elif self.gone_since is None:
+            self.gone_since = now
+        gone_for = 0.0 if self.gone_since is None else now - self.gone_since
+
+        if look.present:
+            weight = 0.55 if self.state == IDLE else 1.0
+            self.look_at_person(look, weight)
+        elif gone_for > LOST_HOLD and self.state == IDLE and now - self.last_drift > IDLE_DRIFT:
             self.drift_az = random.uniform(-0.5, 0.5)
             self.link.look(self.drift_az, -0.2, 0.8)
+            self.sent_look = None
             self.last_drift = now
 
-        # the microphone stays open while the lamp talks, so it can be interrupted, but
-        # the onset threshold goes up so it does not trigger on its own voice coming back
-        # through the speaker. proper echo cancellation is the real fix, see the write up.
+        if self.ears.speaking and not self.was_speaking:
+            # speech only counts if they were looking or already talking to it
+            self.speech_addressed = looking or self.in_conversation(now)
+            if not self.speech_addressed and look.present and self.state != SPEAKING:
+                self.note("talk nearby, not to me, a curious glance")
+                self.link.gesture("perk", amp=0.35)
+        self.was_speaking = self.ears.speaking
+
         self.ears.boost = 3.0 if self.voice.busy() else 1.0
 
-        # transcripts arriving from the worker
         result = self.stt.poll()
         if result is not None:
             text = result["text"]
             self.latency.append(("stt", result["stt_s"]))
             if text:
+                self.last_talk = time.time()
                 self.heard.append(text)
                 self.note(f'heard: "{text}" ({result["stt_s"]:.2f}s, rtf {result["rtf"]:.2f})')
                 self.start(self.respond(text))
             else:
+                self.note("heard nothing usable")
+                self.link.posture("alert" if look.attending else "idle")
                 self.go(ENGAGED if look.attending else IDLE)
 
+        if self.state == THINKING:
+            if not self.think_sound and now - self.since > THINK_SOUND_AFTER:
+                self.sfx("thinking")
+                self.think_sound = True
+            if now - self.since > THINK_TIMEOUT and not self.busy:
+                self.note("thought too long, back to listening")
+                self.link.posture("alert")
+                self.go(ENGAGED)
+
         if self.busy:
-            return                        # a plan is running, it owns the character
+            return
 
         if self.state == IDLE:
-            if look.attending:
+            if self.ears.next_utterance() is not None:
+                self.note("speech while idle, ignored")
+            if look.attending and away_for < GLANCE_IGNORE and now - self.woke_at > WAKE_STRETCH:
                 self.engage()
+            elif not look.present and now - self.last_face > DOZE_AFTER:
+                self.note(f"nobody for {DOZE_AFTER:.0f}s, dozing off")
+                self.doze()
+            return
 
-        elif self.state == ENGAGED:
-            if not look.attending and now - self.since > 0.3:
-                self.disengage()
-            elif self.ears.speaking:
+        limit = CONVO_DISENGAGE if self.in_conversation(now) else DISTRACT_DISENGAGE
+        if self.state == SPEAKING and gone_for > TALK_TO_EMPTY:
+            self.disengage(f"gone {gone_for:.1f}s while talking, trailing off")
+            return
+        if away_for > limit and self.state != SPEAKING:
+            self.disengage(f"looked away {away_for:.1f}s")
+            return
+        if away_for > GLANCE_IGNORE and not self.soft_distracted:
+            self.soft_distracted = True
+            self.note("glanced away, light dips")
+            self.link.light(intensity=0.55)
+        elif away_for <= GLANCE_IGNORE and self.soft_distracted:
+            self.soft_distracted = False
+            self.note("looked back, small lift")
+            self.link.light(intensity=0.85)
+            self.link.gesture("perk", amp=0.4)
+
+        if self.state == ENGAGED:
+            if self.ears.speaking and self.speech_addressed:
                 self.link.posture("listen")
                 self.go(LISTENING)
             else:
                 utt = self.ears.next_utterance()
-                if utt is not None:
+                addressed = (self.speech_addressed or away_for < GLANCE_IGNORE
+                             or self.in_conversation(now))
+                if utt is not None and addressed:
                     self.stt.submit(utt)
-                    self.go(LISTENING)
+                    self.think()
+                elif utt is not None:
+                    self.note(f"dropped {utt.seconds:.1f}s of talk not aimed at me")
 
         elif self.state == LISTENING:
             utt = self.ears.next_utterance()
@@ -178,35 +312,38 @@ class Director:
                 self.note(f"utterance {utt.seconds:.1f}s rms {utt.rms:.3f}, transcribing")
                 self.link.gesture("flash", amp=0.3)
                 self.stt.submit(utt)
+                self.think()
             elif not self.ears.speaking and now - self.since > LISTEN_TIMEOUT:
                 self.link.posture("alert")
                 self.go(ENGAGED)
 
         elif self.state == SPEAKING:
-            if self.ears.speaking and now - self.since > 0.6:
-                # barge in: it stops talking the moment the person starts
+            if self.ears.speaking and self.speech_addressed and now - self.since > 0.6:
                 self.note("barge in, stopping speech")
                 self.voice.cancel()
                 self.link.posture("listen")
                 self.go(LISTENING)
             elif not self.voice.busy():
-                self.link.posture("alert" if look.attending else "idle")
-                self.go(ENGAGED if look.attending else IDLE)
+                self.link.posture("alert" if look.present else "idle")
+                self.go(ENGAGED if look.present else IDLE)
             else:
                 self.link.posture("speak")
 
-    # ---- responding ------------------------------------------------------------------
     async def respond(self, text: str) -> None:
         t0 = time.perf_counter()
         intent, args = PL.route(text)
         self.note(f"intent {intent} {args if args else ''}")
 
+        if intent != PL.Intent.BYE and self.cloud is not None and self.cloud.available:
+            if await self.respond_cloud(text):
+                self.latency.append(("respond", time.perf_counter() - t0))
+                return
+
         if intent == PL.Intent.BYE:
             self.say(random.choice(FAREWELLS))
             self.music(False)
             await self.wait_for_voice()
-            self.link.posture("sleep")
-            self.go(IDLE)
+            self.doze(armed=False)
         elif intent == PL.Intent.WHOAMI:
             self.link.gesture("nod")
             self.say(IDENTITY)
@@ -232,18 +369,57 @@ class Director:
             self.note(f"plan ({self.planner.last_source}): " + " | ".join(str(a) for a in plan))
             await self.run_plan(plan)
         else:
-            reply = ""
-            if self.cloud is not None and self.cloud.available:
-                reply = self.cloud.reply(text, self.memory.describe())
             self.link.gesture("nod", amp=0.5)
-            self.say(reply or "I am not sure what to do with that, but I am listening.")
+            self.say("I am not sure what to do with that, but I am listening.")
 
         self.latency.append(("respond", time.perf_counter() - t0))
+
+    async def respond_cloud(self, text: str) -> bool:
+        jpeg = self.frame_jpeg()
+        aim = self.link.state.get("aim", {"az": 0.0, "el": 0.0})
+        history = "\n".join(f"person: {p}\nlamp: {l}" for p, l in self.history[-HISTORY_TURNS:])
+        t0 = time.perf_counter()
+        turn = await asyncio.get_running_loop().run_in_executor(
+            None, self.cloud.turn, text, jpeg, self.memory.describe(), history,
+            A.prompt_reference())
+        if turn is None:
+            self.note(f"cloud turn failed ({self.cloud.reason}), answering locally")
+            return False
+        self.latency.append(("turn", time.perf_counter() - t0))
+
+        for obj in turn.seen[:4]:
+            self.memory.note(Observation(label=obj.label, detail=obj.detail,
+                                         az=aim["az"], el=aim["el"], source="vision"))
+        self.note(f"turn {time.perf_counter() - t0:.2f}s: saw "
+                  f"{[o.label for o in turn.seen[:4]]}, gesture {turn.gesture or '-'}, "
+                  f"{len(turn.actions)} actions")
+        self.history.append((text, turn.say))
+
+        plan = None
+        if turn.actions:
+            try:
+                plan = PL.Planner.require_observe(
+                    A.validate(self.cloud.steps_to_dicts(turn.actions)))
+            except A.PlanError as exc:
+                self.note(f"refused the model's plan: {exc}")
+
+        if turn.gesture in TURN_GESTURES:
+            self.link.gesture(turn.gesture, amp=0.8)
+        if turn.say:
+            self.say(turn.say)
+            if plan or turn.goodnight:
+                await self.wait_for_voice()
+        if plan:
+            self.note("plan: " + " | ".join(str(a) for a in plan))
+            await self.run_plan(plan)
+        if turn.goodnight:
+            self.music(False)
+            self.doze(armed=False)
+        return True
 
     async def recall(self, question: str) -> None:
         from brain.memory import tokens
         if not tokens(question) and self.memory.items:
-            # nothing specific was asked, so say what it has
             recent = self.memory.recent(3)
             self.link.gesture("nod", amp=0.6)
             self.say("I have seen " + ", and ".join(o.phrase() for o in recent) + ".")
@@ -251,8 +427,6 @@ class Director:
         obs, score = self.memory.find(question)
         self.note(f"recall score {score:.2f} -> {obs.label if obs else None}")
         if (obs is None or score < 0.25) and self.memory.items:
-            # a weak match is not the same as an empty memory. offering what it has is
-            # both more useful and more in character than a flat denial.
             recent = self.memory.recent(3)
             self.link.gesture("nod", amp=0.6)
             self.say("I have seen " + ", and ".join(o.phrase() for o in recent) + ".")
@@ -261,14 +435,12 @@ class Director:
             self.link.gesture("shake", amp=0.7)
             self.say(NO_MEMORY)
             return
-        # look back where it was when it saw the thing, then answer
         self.link.look(obs.az, obs.el)
         self.sfx("found_it")
         ago = time.time() - obs.t
         when = "just now" if ago < 90 else f"about {int(ago / 60)} minutes ago"
         self.say(f"Yes, {obs.phrase()}. I saw it {when}.")
 
-    # ---- running a plan --------------------------------------------------------------
     def frame_jpeg(self) -> bytes | None:
         frame, _ = self.vision.latest_frame()
         if frame is None:
@@ -323,7 +495,6 @@ class Director:
         await asyncio.sleep(1.0)
 
     async def observe(self, note: str) -> None:
-        """look at the frame and remember what is in it, or admit it cannot tell."""
         self.link.light(intensity=1.0)
         self.sfx("thinking")
         jpeg = self.frame_jpeg()
@@ -345,9 +516,8 @@ class Director:
                 await self.wait_for_voice()
                 return
         if report is None:
-            # the no model path: ask, and learn from the answer
             self.note("no vision backend, asking instead")
-            self.ears.drain()      # before asking: an answer given over the question counts
+            self.ears.drain()
             self.say("I am looking, but I cannot tell what that is. What is it?")
             await self.wait_for_voice()
             heard = (await self.wait_for_speech(6.0)).strip(" .")
@@ -359,7 +529,6 @@ class Director:
                 self.say(f"{obs.label}. I will remember that.")
                 await self.wait_for_voice()
             elif heard:
-                # it heard something, but a question is not the name of a thing
                 self.note(f"declined to learn {heard!r}, not a label")
                 self.start(self.respond(heard))
             return
@@ -371,7 +540,6 @@ class Director:
         self.say(report.answer or report.caption)
         await self.wait_for_voice()
 
-    # ---- small waits -----------------------------------------------------------------
     async def wait_for_voice(self, limit: float = 14.0) -> None:
         end = time.time() + limit
         await asyncio.sleep(0.15)
@@ -379,7 +547,6 @@ class Director:
             await asyncio.sleep(0.05)
 
     async def wait_for_speech(self, limit: float) -> str:
-        """used when the character has asked a direct question and wants the answer."""
         self.link.posture("listen")
         end = time.time() + limit
         while time.time() < end:

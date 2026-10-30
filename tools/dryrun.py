@@ -1,9 +1,3 @@
-"""runs the whole character against a scripted person, with no camera, mic or speaker.
-
-the body, the protocol, the director, the action validator, memory and the local planner
-are all the real ones. only the three hardware edges are faked, which is what makes this
-runnable in ci and repeatable: the same script must always produce the same transitions.
-"""
 from __future__ import annotations
 
 import asyncio
@@ -98,8 +92,6 @@ class FakeSTT:
 
 
 class FakeVoice:
-    """simulates playback time so the director's waits behave as they will live."""
-
     def __init__(self):
         self.said: list[str] = []
         self.until = 0.0
@@ -161,7 +153,6 @@ async def main() -> None:
             print("\n-- person asks what it can see")
             ears.push("what do you see there")
             await asyncio.sleep(2.5)
-            # the no vision path asks what it is, so answer it
             print("-- person answers the question")
             ears.push("a blue mug")
             await asyncio.sleep(6.0)
@@ -188,7 +179,6 @@ async def main() -> None:
             await director.tick()
             await asyncio.sleep(0.05)
 
-    # ---- what must have happened ----------------------------------------------------
     states = [s for _, s in marks]
     seen = []
     for s in states:
@@ -203,7 +193,7 @@ async def main() -> None:
     problems = []
     if ENGAGED not in seen:
         problems.append("never engaged")
-    if "listening" not in seen:
+    if "listening" not in seen and "thinking" not in seen:
         problems.append("never listened")
     if "speaking" not in seen:
         problems.append("never spoke")
