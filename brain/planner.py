@@ -1,16 +1,3 @@
-"""routing what was said, and turning a goal into actions without the network if need be.
-
-two layers, and the cheap one answers most of the demonstration. intent routing is a
-handful of patterns over the transcript: greetings, questions about something remembered,
-light requests, goodbyes. only an actual goal, something that needs the scene looked at
-and a sequence chosen, goes out to the model.
-
-the local planner is not a stub. with no api key the character still engages, talks,
-remembers and carries out the goals it recognises. what it loses is the ability to name
-objects it has never been told about, and there it does the honest thing: it looks at the
-thing, says it cannot tell what it is, and asks. the answer goes into memory from speech
-instead of from vision, and every later question about that object works identically.
-"""
 from __future__ import annotations
 
 import re
@@ -31,7 +18,6 @@ DIMMER = re.compile(r"\b(dimmer|darker|too bright|turn it down)\b", re.I)
 GOAL = re.compile(r"\b(point at|shine on|light up the|find|look for|check (if|whether)|"
                   r"can you (find|point|shine|check)|show me)\b", re.I)
 
-# a goal usually names its object after the verb
 GOAL_OBJECT = re.compile(r"\b(?:point at|shine on|light up(?: the)?|find|look for|show me)\s+"
                          r"(?:the\s+|my\s+|a\s+|an\s+)?([a-z0-9 ]{2,30})", re.I)
 
@@ -75,15 +61,12 @@ def route(text: str) -> tuple[str, dict]:
 
 
 class LocalPlanner:
-    """plans the goals it recognises, with no model and no network."""
-
     def __init__(self, memory: SceneMemory):
         self.memory = memory
 
     def plan(self, goal: str, obj: str) -> list[dict]:
         known, score = self.memory.find(obj or goal)
         if known is not None and score > 0.35:
-            # it has seen this before, so it can go straight there and check
             return [
                 {"action": "look_at", "target": known.label},
                 {"action": "light", "intensity": 1.0, "warm": 0.9},
@@ -91,7 +74,6 @@ class LocalPlanner:
                 {"action": "say", "text": f"There it is, {known.label}."},
                 {"action": "done", "summary": f"pointed out {known.label}"},
             ]
-        # it has not, so look around, then admit it and ask, which is how it learns
         return [
             {"action": "scan", "amp": 0.9},
             {"action": "observe", "note": obj},
@@ -104,8 +86,6 @@ class LocalPlanner:
 
 
 class Planner:
-    """prefers the model, falls back to the local planner, validates either way."""
-
     def __init__(self, memory: SceneMemory, cloud=None):
         self.memory = memory
         self.local = LocalPlanner(memory)
@@ -121,15 +101,12 @@ class Planner:
                     self.last_source = "cloud"
                     return self.require_observe(plan)
                 except A.PlanError:
-                    pass          # a refused plan falls through to the local one
+                    pass
         self.last_source = "local"
         return self.require_observe(A.validate(self.local.plan(goal, obj)))
 
     @staticmethod
     def require_observe(plan: list[A.Action]) -> list[A.Action]:
-        """the challenge asks the character to look again before completing a goal, so a
-        plan that would finish without looking gets an observe inserted rather than being
-        allowed to claim success on stale information."""
         kinds = [a.kind for a in plan]
         if "done" in kinds and "observe" not in kinds:
             at = kinds.index("done")

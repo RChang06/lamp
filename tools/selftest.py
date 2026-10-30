@@ -1,9 +1,3 @@
-"""drives the body over its real socket and measures what it does.
-
-this is the evidence script, not a unit test. it reports gaze step response, gesture
-behaviour, speech driven light, torque saturation at the edge of the workspace and the
-real time factor of the physics, all through the same protocol the brain uses.
-"""
 from __future__ import annotations
 
 import asyncio
@@ -41,7 +35,6 @@ class Recorder:
         return [s for s in self.states if s["wall"] >= t0]
 
     def settle(self, t0: float, tol: float = 0.02) -> float | None:
-        """seconds from t0 until the aim error stays under tol."""
         rows = self.since(t0)
         for i, s in enumerate(rows):
             if s["aim_err"] <= tol and all(r["aim_err"] <= tol for r in rows[i:i + 10]):
@@ -66,7 +59,6 @@ async def main() -> None:
             breath = [s["q"]["shoulder_pitch"] for s in rec.states[-20:]]
             print(f"breathing peak to peak on the shoulder: {max(breath) - min(breath):.4f} rad")
 
-            # gaze step: wake up and look up to its left
             await ws.send(P.posture("alert"))
             await ws.send(P.gesture("perk"))
             t0 = time.perf_counter()
@@ -79,14 +71,12 @@ async def main() -> None:
             print(f"  final aim {s['aim']}  err {s['aim_err']}  overshoot {peak - 0.6:+.4f} rad")
             print(f"  joints {s['q']}")
 
-            # the azimuth split: a small glance should barely move the heavy base
             await ws.send(P.look(0.15, 0.0))
             await asyncio.sleep(1.5)
             s = rec.states[-1]
             print(f"\nsmall glance az=0.15 -> base {s['q']['base_yaw']:+.3f} "
                   f"neck {s['q']['neck_yaw']:+.3f} (base takes {100 * s['q']['base_yaw'] / 0.15:.0f}%)")
 
-            # gesture: nod while holding the gaze
             before = rec.states[-1]["q"]["head_pitch"]
             await ws.send(P.gesture("nod"))
             await asyncio.sleep(0.35)
@@ -96,7 +86,6 @@ async def main() -> None:
             print(f"\nnod: head_pitch {before:+.3f} -> {mid:+.3f} -> {after:+.3f}  "
                   f"events {[e['ev'] for e in rec.events]}")
 
-            # speech: stream an envelope and watch the light and body follow it
             await ws.send(P.posture("speak"))
             lights = []
             for i in range(60):
@@ -108,7 +97,6 @@ async def main() -> None:
             await ws.send(P.envelope(0.0))
             print(f"\nspeech envelope: light swung {min(lights):.2f} to {max(lights):.2f}")
 
-            # workspace edge: ask for an aim that needs the arm to carry the head
             await ws.send(P.posture("search"))
             await ws.send(P.look(-1.2, -0.9))
             await asyncio.sleep(3.0)
@@ -117,7 +105,6 @@ async def main() -> None:
             print(f"  achieved {s['aim']}  err {s['aim_err']}  saturated {s['saturated']}")
             print(f"  joints {s['q']}")
 
-            # a malformed command must not take the body down
             await ws.send("{not json")
             await asyncio.sleep(0.3)
             await ws.send(P.gesture("does_not_exist"))
@@ -127,7 +114,6 @@ async def main() -> None:
             pump.cancel()
         await runner
 
-    # physics cost
     n = len(rec.states)
     span = rec.states[-1]["wall"] - rec.states[0]["wall"]
     print(f"\ntelemetry {n} frames over {span:.1f}s = {n / span:.1f} hz "

@@ -1,9 +1,3 @@
-"""the brain's end of the body protocol.
-
-keeps the latest telemetry, rate limits the envelope stream, and never blocks the
-director: if the body is slow or gone, commands are dropped and the character keeps
-thinking. the body is the one part of this system that is allowed to be absent.
-"""
 from __future__ import annotations
 
 import asyncio
@@ -30,7 +24,6 @@ class BodyLink:
         self.rtt_ms: list[float] = []
 
     async def run(self) -> None:
-        """connect, and keep reconnecting, for as long as the brain lives."""
         self.loop = asyncio.get_running_loop()
         while True:
             try:
@@ -50,12 +43,10 @@ class BodyLink:
             await asyncio.sleep(0.5)
 
     def send(self, raw: str) -> None:
-        """fire and forget. the director runs at 20 hz and must never await the body."""
         if self.ws is None or self.loop is None:
             self.dropped += 1
             return
         self.sent += 1
-        # the envelope arrives from the audio thread, so schedule onto the loop
         self.loop.call_soon_threadsafe(lambda: asyncio.ensure_future(self._send(raw)))
 
     async def _send(self, raw: str) -> None:
@@ -64,7 +55,6 @@ class BodyLink:
         except Exception:
             self.dropped += 1
 
-    # ---- convenience, so the director reads like direction ---------------------------
     def look(self, az: float, el: float, weight: float = 1.0) -> None:
         self.send(P.look(az, el, weight))
 
@@ -78,12 +68,11 @@ class BodyLink:
         self.send(P.light(**kw))
 
     def envelope(self, level: float) -> None:
-        # the audio callback fires every 23 ms, the body only needs 30 hz of it
         now = time.perf_counter()
         if now - self.last_env < 0.030:
             return
         if level <= 0.002 and self.quiet_env:
-            return          # silence is the default, it does not need restating
+            return
         self.quiet_env = level <= 0.002
         self.last_env = now
         self.send(P.envelope(level))

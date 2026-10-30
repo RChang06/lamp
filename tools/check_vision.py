@@ -1,4 +1,3 @@
-# live camera check: engagement timing, aim mapping, cpu cost
 import sys, time
 sys.path.insert(0, ".")
 from brain.vision import Vision

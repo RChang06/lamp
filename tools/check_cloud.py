@@ -1,9 +1,3 @@
-"""checks the one remote step against a synthetic scene, not the camera.
-
-a drawn image rather than a webcam frame on purpose: this test is about whether the call,
-the structured output and the plan validator work, and it should be runnable without
-sending a picture of anyone's room anywhere.
-"""
 from __future__ import annotations
 
 import sys
@@ -21,15 +15,14 @@ from common import actions as A
 
 
 def synthetic_desk() -> bytes:
-    """a flat drawing of a desk: a blue mug, a yellow book, a green plant."""
     img = np.full((480, 640, 3), 210, dtype=np.uint8)
-    cv2.rectangle(img, (0, 330), (640, 480), (150, 170, 190), -1)        # desk surface
-    cv2.rectangle(img, (120, 250), (210, 350), (190, 110, 40), -1)       # mug body
+    cv2.rectangle(img, (0, 330), (640, 480), (150, 170, 190), -1)
+    cv2.rectangle(img, (120, 250), (210, 350), (190, 110, 40), -1)
     cv2.ellipse(img, (165, 250), (45, 16), 0, 0, 360, (220, 150, 80), -1)
-    cv2.ellipse(img, (222, 295), (26, 30), 0, 250, 440, (190, 110, 40), 10)  # handle
-    cv2.rectangle(img, (300, 300), (470, 350), (60, 200, 230), -1)       # book
+    cv2.ellipse(img, (222, 295), (26, 30), 0, 250, 440, (190, 110, 40), 10)
+    cv2.rectangle(img, (300, 300), (470, 350), (60, 200, 230), -1)
     cv2.rectangle(img, (300, 300), (470, 350), (40, 150, 180), 3)
-    cv2.rectangle(img, (520, 270), (580, 350), (120, 120, 130), -1)      # pot
+    cv2.rectangle(img, (520, 270), (580, 350), (120, 120, 130), -1)
     for dx, dy in ((0, -40), (-25, -25), (25, -25), (-12, -55), (12, -55)):
         cv2.ellipse(img, (550 + dx, 270 + dy), (22, 11), 0, 0, 360, (60, 140, 60), -1)
     ok, buf = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
@@ -60,7 +53,6 @@ def main() -> None:
     for o in report.objects:
         print(f"  object : {o.label}" + (f" ({o.detail})" if o.detail else ""))
 
-    # the memory the planner will reason over
     mem = SceneMemory("run/cloud_check_memory.jsonl")
     from brain.memory import Observation
     for o in report.objects[:4]:

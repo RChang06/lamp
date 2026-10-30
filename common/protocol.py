@@ -1,13 +1,3 @@
-"""wire protocol between the character (brain) and the simulated body.
-
-newline delimited json over a websocket. the brain sends character intent, never joint
-trajectories: it says where to look and how to carry itself, and the body owns the
-kinematics, the servo limits and every bit of timing. that boundary is deliberate, the
-body stays runnable and testable with no perception stack attached.
-
-angles are radians in the body frame: azimuth is ccw from the lamp's forward direction
-(positive turns to its own left), elevation is positive up.
-"""
 from __future__ import annotations
 
 import json
@@ -17,16 +7,14 @@ from typing import Any
 PROTOCOL_VERSION = 1
 DEFAULT_PORT = 8765
 
-# brain -> body
-CMD_LOOK = "look"          # az, el, optional weight for partial attention
-CMD_POSTURE = "posture"    # name of a posture preset
-CMD_GESTURE = "gesture"    # name, amp, speed: additive overlay, body reports completion
-CMD_LIGHT = "light"        # intensity, warm, pulse
-CMD_ENVELOPE = "envelope"  # level 0..1, streamed while speaking
+CMD_LOOK = "look"
+CMD_POSTURE = "posture"
+CMD_GESTURE = "gesture"
+CMD_LIGHT = "light"
+CMD_ENVELOPE = "envelope"
 CMD_RESET = "reset"
 CMD_HELLO = "hello"
 
-# body -> brain
 MSG_STATE = "state"
 MSG_EVENT = "event"
 MSG_HELLO = "hello"

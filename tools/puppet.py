@@ -1,13 +1,3 @@
-"""drive the body by hand, with no camera, microphone or model anywhere near it.
-
-type commands, watch the lamp. this is how the motion layer gets tuned, and it is the
-reason the body is a separate process: the whole character surface is reachable over one
-socket, so the physical half can be judged on its own before any perception exists.
-
-  python -m body.main                 in one terminal, opens the viewer
-  python tools/puppet.py              in another, this
-  python tools/puppet.py --showcase   or let it drive itself through everything
-"""
 from __future__ import annotations
 
 import argparse
@@ -42,7 +32,7 @@ commands
 
 SHOWCASE: list[tuple[float, str | None]] = [
     (0.0, "sleep"), (1.5, "light 0.1"),
-    (2.0, None),                                   # asleep, breathing slowly
+    (2.0, None),
     (4.0, "alert"), (4.0, "perk"), (4.1, "light 0.9"),
     (5.5, "look 0.5 0.25"), (7.0, "look -0.5 0.25"), (8.5, "look 0.0 0.3"),
     (10.0, "nod"), (11.2, "shake"), (12.5, "nod2"),
@@ -76,7 +66,6 @@ class Puppet:
                 print(f"\n[body] {msg}")
 
     async def do(self, line: str) -> bool:
-        """returns False to quit."""
         parts = line.split()
         if not parts:
             return True
@@ -117,7 +106,6 @@ class Puppet:
         return True
 
     async def fake_speech(self, text: str) -> None:
-        """an envelope shaped like speech, so the body and light can be judged without tts."""
         import math
         import random
         await self.ws.send(P.posture("speak"))
@@ -125,7 +113,6 @@ class Puppet:
         steps = int(dur * 30)
         for i in range(steps):
             t = i / 30
-            # syllable rate around 4 hz, with word gaps
             level = max(0.0, 0.55 + 0.45 * math.sin(2 * math.pi * 4.0 * t)) * \
                 (0.3 if (int(t * 1.6) % 5 == 4) else 1.0) * random.uniform(0.85, 1.0)
             await self.ws.send(P.envelope(min(1.0, level)))

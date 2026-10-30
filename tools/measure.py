@@ -1,13 +1,3 @@
-"""the measurements the submission has to report, taken rather than estimated.
-
-covers what can be measured without a person in the room: per stage latency, the cost of
-the protocol itself, the body's cpu and memory while it runs, and the physics real time
-factor. engagement reliability needs a human and is measured separately by
-tools/engagement.py.
-
-every number printed here is measured on the machine it runs on. none of it is copied
-from a datasheet, and where a figure is a budget rather than a measurement it says so.
-"""
 from __future__ import annotations
 
 import asyncio
@@ -45,7 +35,6 @@ def stat(name: str, values: list[float], unit: str = "ms") -> None:
           f"p95 {np.percentile(a, 95):7.2f} max {a.max():7.2f} {unit}")
 
 
-# ---- stage latencies, each on its own ------------------------------------------------
 def measure_vision() -> None:
     heading("perception: face landmarker")
     import cv2
@@ -55,7 +44,6 @@ def measure_vision() -> None:
         base_options=BaseOptions(model_asset_path="models/face_landmarker.task"),
         running_mode=mpv.RunningMode.VIDEO,
         output_facial_transformation_matrixes=True, num_faces=1))
-    # a synthetic frame: no face, so this is the floor cost of running the graph
     frame = np.full((480, 640, 3), 120, dtype=np.uint8)
     times = []
     for i in range(60):
@@ -120,7 +108,6 @@ def measure_stt() -> None:
     stat("real time factor", [t / 1000 / secs for t in times], unit="x")
 
 
-# ---- the protocol and the body --------------------------------------------------------
 async def measure_body() -> dict:
     heading("body: protocol latency, cpu, memory, real time factor")
     env = dict(os.environ)
@@ -128,7 +115,7 @@ async def measure_body() -> dict:
                              "--seconds", "150"], stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, text=True, env=env)
     ps = psutil.Process(proc.pid)
-    await asyncio.sleep(4.0)        # model build and first telemetry
+    await asyncio.sleep(4.0)
 
     rtt, react = [], []
     cpu, rss = [], []
@@ -156,8 +143,6 @@ async def measure_body() -> dict:
 
 
 def tree(ps: psutil.Process) -> list[psutil.Process]:
-    """the venv launcher re-execs the real interpreter as a child on windows, so the
-    whole tree has to be summed or the measurement lands on an idle trampoline."""
     out = [ps]
     try:
         out += ps.children(recursive=True)
@@ -189,7 +174,7 @@ def rss_mb(ps: psutil.Process) -> float:
 
 async def _body_loop(PORT, ps, rtt, react, cpu, rss) -> None:
     async with connect(f"ws://127.0.0.1:{PORT}") as ws:
-        await ws.recv()             # hello
+        await ws.recv()
         ps.cpu_percent(None)
 
         async def latest():
@@ -203,8 +188,6 @@ async def _body_loop(PORT, ps, rtt, react, cpu, rss) -> None:
         cpu_t0 = cpu_seconds(ps)
 
         for i in range(16):
-            # eight swings in the idle bandwidth, eight in the alert bandwidth, because
-            # the posture sets the reference filter and so sets the arrival time
             if i == 0:
                 await ws.send(P.posture("idle"))
             if i == 8:
@@ -213,13 +196,11 @@ async def _body_loop(PORT, ps, rtt, react, cpu, rss) -> None:
             az = 0.45 if i % 2 == 0 else -0.45
             t0 = time.perf_counter()
             await ws.send(P.look(az, 0.2))
-            # time until the body's own telemetry shows it acting on the command
             while True:
                 s = await latest()
                 if abs(s["aim_cmd"]["az"] - az) < 0.02:
                     rtt.append(1000 * (time.perf_counter() - t0))
                     break
-            # and time until the head is actually there
             while True:
                 s = await latest()
                 if s["aim_err"] < 0.02:
@@ -234,7 +215,6 @@ async def _body_loop(PORT, ps, rtt, react, cpu, rss) -> None:
         wall_elapsed = time.perf_counter() - wall_t0
         cpu.append(100.0 * (cpu_seconds(ps) - cpu_t0) / wall_elapsed)
         globals()["_RTF"] = (sim_elapsed, wall_elapsed)
-
 
 
 def measure_footprint() -> None:

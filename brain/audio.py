@@ -1,12 +1,3 @@
-"""one output stream for everything the character makes: voice, sound effects, music.
-
-the point of mixing these ourselves rather than firing three players is that they have to
-behave like one creature. music ducks under the voice, an effect lands on top without
-cutting either, and the voice channel's level is published every block so the body can
-move and the light can breathe with the speech. the lamp's glow following its own voice is
-the single cheapest thing that makes the character read as one thing instead of a speaker
-sat next to a puppet.
-"""
 from __future__ import annotations
 
 import math
@@ -17,8 +8,8 @@ from typing import Callable
 import numpy as np
 import sounddevice as sd
 
-SR = 22050          # piper lessac medium is 22.05 khz, so nothing is resampled
-BLOCK = 512         # 23 ms, small enough that the envelope leads the motion
+SR = 22050
+BLOCK = 512
 
 
 @dataclass
@@ -27,7 +18,7 @@ class Channel:
     pos: int = 0
     gain: float = 1.0
     loop: bool = False
-    fade: float = 1.0           # current fade multiplier
+    fade: float = 1.0
     fade_to: float = 1.0
     done: bool = False
 
@@ -45,15 +36,12 @@ class Channel:
             self.pos = end
             if self.pos >= len(self.data):
                 self.done = True
-        # per block linear fade toward the target, used for ducking and clean stops
         ramp = np.linspace(self.fade, self.fade_to, n, dtype=np.float32)
         self.fade = self.fade_to
         return out * self.gain * ramp
 
 
 class AudioOut:
-    """mixes the channels, ducks music under speech, reports the voice level."""
-
     def __init__(self, on_level: Callable[[float], None] | None = None, device=None):
         self.ch: dict[str, Channel] = {}
         self.lock = threading.Lock()
@@ -78,7 +66,7 @@ class AudioOut:
             speaking = "voice" in self.ch and not self.ch["voice"].done
             for name, c in list(self.ch.items()):
                 if name == "music":
-                    c.fade_to = 0.30 if speaking else 1.0   # duck under the voice
+                    c.fade_to = 0.30 if speaking else 1.0
                 block = c.take(frames)
                 if name == "voice":
                     voice_level = float(np.sqrt(np.mean(block * block)))
@@ -88,7 +76,6 @@ class AudioOut:
         np.clip(mix, -1.0, 1.0, out=mix)
         outdata[:, 0] = mix
         if self.on_level is not None:
-            # 0.12 rms is a comfortable speaking level, so that maps to a full swing
             self.on_level(min(1.0, voice_level / 0.12))
 
     def play(self, name: str, data: np.ndarray, gain: float = 1.0, loop: bool = False) -> None:
@@ -105,11 +92,6 @@ class AudioOut:
             c = self.ch.get(name)
             return c is not None and not c.done
 
-
-# ---- procedural sounds -------------------------------------------------------------
-# synthesized rather than shipped as wav files: no asset licensing to explain in the
-# submission, a few hundred bytes of code instead of megabytes, and the character's
-# effects and music end up sharing one tuning so they sound related.
 
 def _env(n: int, attack: float = 0.01, release: float = 0.25) -> np.ndarray:
     t = np.arange(n) / SR
@@ -150,23 +132,19 @@ def blip(dur=0.10) -> np.ndarray:
 
 
 def thinking(dur=0.9) -> np.ndarray:
-    # two close tones beating slowly, reads as "working on it"
     n = int(SR * dur)
     return (_tone(392, dur, detune=0.006) * _env(n, 0.08, 0.6) * 0.22)
 
 
 def found_it(dur=0.45) -> np.ndarray:
-    # a small rising third, the sound of recognising something
     parts = [_tone(587, 0.12), _tone(740, 0.12), _tone(880, 0.21)]
     out = np.concatenate([p * _env(len(p), 0.004, 0.09) for p in parts])
     return out * 0.4
 
 
 def music_bed(bars: float = 4.0, bpm: float = 68.0) -> np.ndarray:
-    """a slow warm loop, quiet enough to sit under speech. kept simple and diatonic so
-    it never fights the voice for attention."""
     beat = 60.0 / bpm
-    seq = [262, 330, 392, 330, 294, 349, 440, 349]      # c major wandering, two bars
+    seq = [262, 330, 392, 330, 294, 349, 440, 349]
     notes = []
     for i in range(int(len(seq) * bars / 2)):
         f = seq[i % len(seq)] / 2
@@ -174,10 +152,8 @@ def music_bed(bars: float = 4.0, bpm: float = 68.0) -> np.ndarray:
         n = int(SR * d)
         notes.append(_tone(f, d, detune=0.004) * _env(n, 0.12, d * 0.8) * 0.5)
     loop = np.concatenate(notes)
-    # soft pad underneath to glue the notes together
     pad = _tone(131, len(loop) / SR, detune=0.003) * 0.12
     out = loop + pad
-    # crossfade the ends so the loop does not click
     k = int(0.15 * SR)
     ramp = np.linspace(0, 1, k, dtype=np.float32)
     out[:k] *= ramp

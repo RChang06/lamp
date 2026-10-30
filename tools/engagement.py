@@ -1,14 +1,3 @@
-"""engagement reliability, measured with a person in front of the camera.
-
-the one number in the submission that cannot be synthesized. it runs trials, tells you
-when to look and when to look away, and records whether the character noticed, how long
-it took, and whether it ever engaged while nobody was attending.
-
-  uv run python tools/engagement.py --trials 10
-
-report the false engagement count honestly: it is the number that decides whether the
-thing is pleasant to sit next to.
-"""
 from __future__ import annotations
 
 import argparse
@@ -54,7 +43,6 @@ def main() -> None:
         time.sleep(2.5)
         if v.look.attending:
             wait_for(v, False, 3.0)
-        # watch for a spurious engagement while nobody is attending
         t0 = time.perf_counter()
         while time.perf_counter() - t0 < 2.0:
             if v.look.attending:
