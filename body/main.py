@@ -1,10 +1,3 @@
-"""the simulated body: mujoco, the servos, the lamp light, and the websocket it listens on.
-
-runs on its own. with no brain connected it idles and breathes, which makes it testable
-without a camera or a microphone anywhere near it. everything character shaped arrives as
-a command on the socket, and everything physical that happens is reported back as
-telemetry, including torque saturation the brain is not allowed to ignore.
-"""
 from __future__ import annotations
 
 import argparse
@@ -43,11 +36,10 @@ class Body:
         self.want_view = view
         self.viewer = None
 
-        # commanded character state
         self.posture = POSTURES["idle"]
         self.az = 0.0
         self.el = -0.25
-        self.rest_az = 0.0   # facing frozen while in a parked posture like sleep
+        self.rest_az = 0.0
         self.weight = 1.0
         self.light_set = self.posture.light
         self.warmth = 0.85
@@ -55,7 +47,6 @@ class Body:
         self.last_env_t = time.perf_counter()
         self.events: list[dict] = []
 
-        # actuator bookkeeping, effort limits come from the urdf by way of the model
         self.act = {name: self.model.actuator(name).id for name in JOINTS}
         self.qadr = {name: self.model.joint(name + "_joint").qposadr[0] for name in JOINTS}
         self.effort = {}
@@ -79,7 +70,6 @@ class Body:
         self.mixer.reference.start(targets)
         mujoco.mj_forward(self.model, self.data)
 
-    # ---- commands from the brain ----------------------------------------------------
     def apply(self, msg: dict) -> None:
         cmd = msg.get("cmd")
         if cmd == P.CMD_LOOK:
@@ -110,10 +100,8 @@ class Body:
                                      max(1e-3, now - self.last_env_t))
             self.last_env_t = now
 
-    # ---- one control tick -----------------------------------------------------------
     def control(self) -> None:
         p = self.posture
-        # partial attention aims part of the way, a glance rather than a lock on
         aim_az = self.az * self.weight
         aim_el = self.el * self.weight + (1.0 - self.weight) * -0.15
         if p.rest_head is not None:
@@ -121,22 +109,16 @@ class Body:
         targets, got_az, got_el = self.solver.solve(aim_az, aim_el, p)
         self.cmd_aim = (got_az, got_el)
 
-        # the filter smooths the aim and posture steps only. breathing, gestures and the
-        # speech motion are already smooth functions of time, so they are added after it
-        # and come out at the amplitude that was asked for.
+        # breathing and gestures go on after the filter so they keep their amplitude
         off = self.mixer.advance(self.ctrl_dt, p.breath_amp, p.breath_hz, p.sway)
         ref = self.mixer.reference.step(targets, p.omega, self.ctrl_dt)
 
-        # gravity feedforward. a position servo settles wherever its stiffness balances the
-        # load, which on this arm is up to 0.05 rad short. qfrc_bias is the gravity and
-        # coriolis torque the model needs held, so dividing it by the servo stiffness gives
-        # the extra command that holds the pose. no integrator, so nothing to wind up.
+        # gravity feedforward, holds the pose without an integrator
         bias = self.data.qfrc_bias
         for name in JOINTS:
             ff = bias[self.dofadr[name]] / self.kp[name]
             self.data.ctrl[self.act[name]] = self.solver.clamp(name, ref[name] + off[name] + ff)
 
-        # light: posture level, times the gesture and speech factor, times an optional pulse
         mul = self.mixer.light_mul
         if self.pulse > 0:
             mul *= 1.0 + self.pulse * 0.35 * math.sin(2 * math.pi * 0.7 * self.mixer.t)
@@ -145,10 +127,6 @@ class Body:
         self.model.light_diffuse[self.light_id] = rgb
         self.model.mat_emission[self.bulb_id] = 0.15 + 0.85 * min(1.0, self.level)
 
-        # aim bookkeeping. the offsets are taken back out of the measurement so that a nod
-        # does not read as a pointing error, which keeps the two numbers meaningful:
-        # aim_err is "did the head end up where the brain asked", track_err is "are the
-        # servos keeping up with their own reference".
         q = self.data.qpos
         off_az = off["base_yaw"] + off["neck_yaw"]
         off_el = off["shoulder_pitch"] + off["elbow_pitch"] - off["head_pitch"]
@@ -164,7 +142,6 @@ class Body:
         for name in self.mixer.done:
             self.events.append({"ev": "gesture_done", "name": name})
 
-    # ---- telemetry ------------------------------------------------------------------
     def telemetry(self) -> dict:
         q = {n: float(self.data.qpos[self.qadr[n]]) for n in JOINTS}
         sat = [n for n in JOINTS
@@ -185,7 +162,6 @@ class Body:
             "warnings": [int(w.number) for w in self.data.warning if w.number],
         }
 
-    # ---- loops ----------------------------------------------------------------------
     async def serve(self, ws) -> None:
         self.clients.add(ws)
         await ws.send(json.dumps({"type": P.MSG_HELLO, "version": P.PROTOCOL_VERSION,
@@ -195,7 +171,7 @@ class Body:
             async for raw in ws:
                 try:
                     self.apply(P.parse(raw))
-                except Exception as exc:  # a bad command must never take the body down
+                except Exception as exc:
                     await ws.send(json.dumps({"type": P.MSG_EVENT, "ev": "bad_command",
                                               "error": str(exc)}))
         except ConnectionClosed:
