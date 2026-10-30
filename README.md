@@ -1,5 +1,10 @@
 # Lamp
 
+**Demo video:** [media/demo.mp4](media/demo.mp4) (87 s, one continuous take)
+
+Needs `ANTHROPIC_API_KEY` for conversation and object vision. Without it, it still runs in
+local mode: it notices you, follows you, listens, handles simple commands and sleeps.
+
 A live character built on the supplied five degree-of-freedom lamp. Two processes: a
 simulated **body** that owns physics, servos and light, and a **brain** that watches,
 listens, remembers and decides. They talk over one websocket in newline delimited JSON.
