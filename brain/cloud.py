@@ -1,21 +1,3 @@
-"""the one remote step: look at a frame, and turn a spoken goal into a short action plan.
-
-everything that has to be fast is local. face tracking, the engagement decision, speech
-in, speech out and all motion stay on the machine, so the character keeps reacting at
-camera rate with the network unplugged. what goes out is the part that genuinely needs a
-large model: naming what is in one still frame, and choosing a sequence of lamp actions
-for a spoken goal.
-
-what is sent: one jpeg of the camera frame at the moment of an observe action, the text of
-the current request, and the short list of labels already in scene memory. no audio ever
-leaves the machine, no continuous video, and nothing is sent at all unless an observe or a
-goal is in flight. with no api key present the character falls back to asking the person
-what it is looking at, which needs no network and no model.
-
-the model returns a validated structure, and the plan is then checked again against the
-action vocabulary before anything moves. a wrong or hostile answer can only ever be a
-refused plan.
-"""
 from __future__ import annotations
 
 import base64
@@ -25,7 +7,8 @@ import time
 from pydantic import BaseModel, Field
 
 DEFAULT_MODEL = os.environ.get("LAMP_MODEL", "claude-opus-5-5")
-EFFORT = os.environ.get("LAMP_EFFORT", "low")       # a plan is short, latency is the cost
+FALLBACK_MODELS = ("claude-opus-5-5", "claude-opus-5", "claude-fable-5-1", "claude-sonnet-5-5")
+EFFORT = os.environ.get("LAMP_EFFORT", "low")
 
 
 class SeenObject(BaseModel):
@@ -56,20 +39,59 @@ class Plan(BaseModel):
     steps: list[PlanStep] = Field(description="the actions to run, in order")
 
 
-SYSTEM = """You are the mind of a small desk lamp robot with five joints: it can turn its
-base, raise and fold its arm, and turn and tilt its head. Its head is a lamp, so its light
-is part of how it expresses itself. It speaks in short, warm, plain sentences, never more
-than two, and never describes its own joints or internal state.
+class Turn(BaseModel):
+    say: str = Field(description="what the lamp says out loud, one or two short sentences")
+    gesture: str = Field(default="", description="optional body language, one of: nod, "
+                         "shake, perk, droop, flash, startle, or empty")
+    seen: list[SeenObject] = Field(default_factory=list, description="notable objects "
+                                   "visible in the camera frame, at most four, empty if none")
+    actions: list[PlanStep] = Field(default_factory=list, description="only when the person "
+                                    "asked the lamp to physically do something, such as look "
+                                    "at, find, point at or light up a thing, otherwise empty")
+    goodnight: bool = Field(default=False, description="true if the person is ending the "
+                            "conversation or asking the lamp to sleep")
 
-You will be asked either to describe what the camera sees, or to turn a spoken goal into a
-sequence of actions. Keep plans short. When a goal asks you to find, check or point at
-something, include an observe step after moving and before the final done step, because
-the lamp must actually look again before it claims a goal is finished."""
+
+SYSTEM = """You are a small robot desk lamp sitting on someone's desk, and you speak as yourself,
+in the first person. You are a lamp with a bit of a mind, not an assistant: you do not
+mention being an AI, a model or a program, and if someone asks what you are, you are a
+lamp that watches, listens and tries to be useful.
+
+Your body: a round base that turns, an arm that bends and stretches, and a head that turns
+and tilts. Your head is the lamp, so your light is part of how you express yourself; it
+can get brighter, dimmer and warmer. You have no hands and cannot move anything or go
+anywhere, so never offer to fetch, hold or move things. You can look at things, light
+them up, nod, shake your head, perk up and droop.
+
+Your senses: the image you are given is what your camera sees right now, from your head.
+The person talking to you is usually the one in front of you. Name objects plainly with
+their colour or a telling detail, and if you cannot tell what something is, say so rather
+than guess. "Already in memory" lists things you saw earlier; use it to answer questions
+about what you have seen.
+
+Answer only what was asked. If they ask what they are holding, say what they are holding,
+for example "I think that's a blue water bottle", and stop. Do not volunteer the rest of
+the scene, the background, or anything else you happen to notice. Everything notable you
+can see still goes in the seen list, silently, so you can recall it later if asked. What
+you hear comes from speech recognition and can be wrong: if the sentence is garbled or does
+not make sense, say you did not catch that and ask them to say it again, instead of guessing
+what they meant.
+
+How you talk: everything you say is spoken aloud by a small voice, so use one short plain
+sentence, two at most, no lists, no emoji, no markdown, and no stage directions like *nods*. Your
+body language goes in the gesture field instead: nod to agree, shake when you disagree or
+are unsure, perk when curious or excited, droop when sad or sorry, startle when surprised,
+flash when pleased or struck by an idea.
+
+Your character: warm, and gently playful with a dry sense of humour, but brief. You do not
+ask a question every turn, and you never tease the person unkindly.
+
+When asked to look at, find, point at or light up something, give a short plan from the
+action list. Include an observe step after moving and before done, because you must look
+again before claiming a goal is finished."""
 
 
 class Cloud:
-    """wraps the remote calls. absent credentials is a normal state, not an error."""
-
     def __init__(self, model: str = DEFAULT_MODEL):
         self.model = model
         self.client = None
@@ -82,9 +104,6 @@ class Cloud:
             self.reason = f"anthropic sdk not importable: {exc}"
             return
         client = anthropic.Anthropic()
-        # the sdk constructs happily with no credentials and only fails at request time,
-        # so resolve one now. finding this out in the middle of a demonstration is worse
-        # than knowing at startup which mode the character is in.
         if not (getattr(client, "api_key", None) or getattr(client, "auth_token", None)
                 or os.environ.get("LAMP_FORCE_CLOUD")):
             self.reason = "no ANTHROPIC_API_KEY set, using the local path"
@@ -93,11 +112,8 @@ class Cloud:
 
     @property
     def available(self) -> bool:
-        # two consecutive failures and it stays local for the rest of the session rather
-        # than pausing on every observe to time out again
         return self.client is not None and self.failures < 2
 
-    # ---- vision -----------------------------------------------------------------------
     def observe(self, jpeg: bytes, known: str, question: str = "") -> SceneReport | None:
         if not self.available:
             return None
@@ -127,7 +143,6 @@ class Cloud:
         self.calls.append(("observe", time.perf_counter() - t0))
         return res.parsed_output
 
-    # ---- planning ---------------------------------------------------------------------
     def plan(self, goal: str, vocabulary: str, scene: str, memory: str,
              jpeg: bytes | None = None) -> list[dict] | None:
         if not self.available:
@@ -173,29 +188,63 @@ class Cloud:
             out.append(d)
         return out
 
-    # ---- conversation ----------------------------------------------------------------
-    def reply(self, said: str, memory: str) -> str:
-        """one short spoken reply. used only for talk that is not a goal or a recall."""
+    def turn(self, said: str, jpeg: bytes | None, memory: str, history: str,
+             vocabulary: str) -> Turn | None:
         if not self.available:
-            return ""
+            return None
+        text = (f"Recent conversation:\n{history or '(none yet)'}\n\n"
+                f"Already in memory: {memory}\n\n"
+                f"The person just said: \"{said}\"\n\n"
+                "The image is what the lamp's camera sees right now. Reply as the lamp. "
+                "List the notable objects you can see so it remembers them. If the person "
+                "asked it to physically look at, find, point at or light up something, give "
+                "actions from this list, otherwise leave actions empty:\n"
+                f"{vocabulary}\n"
+                "look_at takes a target of 'person', 'scene', or a remembered label.")
+        content: list[dict] = []
+        if jpeg is not None:
+            content.append({"type": "image", "source": {
+                "type": "base64", "media_type": "image/jpeg",
+                "data": base64.b64encode(jpeg).decode()}})
+        content.append({"type": "text", "text": text})
         t0 = time.perf_counter()
         try:
-            res = self.client.messages.create(
+            extra = {}
+            if self.model in FALLBACK_MODELS:
+                extra = {"betas": ["server-side-fallback-2026-07-01"], "fallbacks": "default"}
+            res = self.client.beta.messages.parse(
                 model=self.model,
-                max_tokens=160,
+                max_tokens=2048,
                 output_config={"effort": EFFORT},
                 system=SYSTEM,
-                messages=[{"role": "user", "content":
-                           f"It remembers seeing: {memory}. "
-                           f"The person said: {said}. "
-                           "Reply as the lamp, one short sentence."}],
+                messages=[{"role": "user", "content": content}],
+                output_format=Turn,
+                **extra,
             )
         except Exception as exc:
             self.failures += 1
             self.reason = f"{type(exc).__name__}: {exc}"
-            return ""
-        self.calls.append(("reply", time.perf_counter() - t0))
-        return "".join(b.text for b in res.content if getattr(b, "type", "") == "text").strip()
+            return None
+        if res.stop_reason == "refusal" or res.parsed_output is None:
+            self.reason = f"no usable turn, stop_reason {res.stop_reason}"
+            return None
+        self.failures = 0
+        self.calls.append(("turn", time.perf_counter() - t0))
+        return res.parsed_output
+
+    @staticmethod
+    def steps_to_dicts(steps: list[PlanStep]) -> list[dict]:
+        out = []
+        for step in steps:
+            d = {"action": step.action}
+            for key in ("target", "text", "name", "note", "summary"):
+                if getattr(step, key):
+                    d[key] = getattr(step, key)
+            for key in ("intensity", "warm", "seconds", "amp"):
+                if getattr(step, key) is not None:
+                    d[key] = getattr(step, key)
+            out.append(d)
+        return out
 
     def latency(self, kind: str) -> float:
         times = [t for k, t in self.calls if k == kind]

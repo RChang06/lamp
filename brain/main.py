@@ -1,12 +1,3 @@
-"""the character process. starts the senses, connects to the body, runs the director.
-
-two processes on purpose. the body is a hard real time thing: it integrates physics and
-holds servo references on a clock. the brain is a soft real time thing full of models that
-occasionally take half a second. keeping them apart means a slow transcription cannot
-stutter the motion, either one can be restarted without the other, and the body can be
-driven by hand for testing. the cost is one websocket and a serialisation step, measured
-in the write up.
-"""
 from __future__ import annotations
 
 import argparse
@@ -28,6 +19,7 @@ from brain.voice import Voice
 from common import protocol as P
 
 TICK = 1 / 20.0
+STATUS_EVERY = 10.0
 
 
 def summary(d: Director, link: BodyLink, vision: Vision, voice: Voice, cloud: Cloud) -> None:
@@ -66,6 +58,7 @@ async def main() -> None:
     ap.add_argument("--quiet", action="store_true", help="no music bed")
     ap.add_argument("--seconds", type=float, default=0.0, help="stop after this long")
     ap.add_argument("--whisper", default="base.en")
+    ap.add_argument("--debug", action="store_true", help="window with the camera and live state")
     args = ap.parse_args()
 
     link = BodyLink(args.body)
@@ -76,19 +69,19 @@ async def main() -> None:
     voice = Voice(audio)
     ears = Ears()
     ears.start()
-    print("loading whisper", flush=True)
-    stt = Transcriber(args.whisper)
+    print("loading speech recognition", flush=True)
+    stt = Transcriber(args.whisper, keep_dir="run/utterances" if args.debug else None)
     vision = Vision(cam_index=args.cam, mirror=args.mirror)
     vision.start()
 
     memory = SceneMemory()
     cloud = Cloud()
+    print(f"voice: {voice.engine}, hearing: {stt.engine}", flush=True)
     print(f"vision backend: {'cloud ' + cloud.model if cloud.available else 'none, will ask'}"
           + (f" ({cloud.reason})" if not cloud.available and cloud.reason else ""), flush=True)
     director = Director(link, vision, ears, stt, voice, audio, memory,
                         Planner(memory, cloud), cloud, quiet=args.quiet)
 
-    # wait briefly for the body, but run without it rather than refusing to start
     for _ in range(20):
         if link.connected:
             break
@@ -96,11 +89,25 @@ async def main() -> None:
     print(f"body {'connected' if link.connected else 'NOT connected, running headless'}",
           flush=True)
     director.note("awake")
+    view = None
+    if args.debug:
+        from brain.debugview import DebugView
+        view = DebugView(director, vision, ears, link)
 
+    last_status = 0.0
     try:
         while True:
             t0 = time.perf_counter()
             await director.tick()
+            if view is not None:
+                view.draw()
+            if time.time() - last_status > STATUS_EVERY:
+                last_status = time.time()
+                lk = vision.look
+                frame, _ = vision.latest_frame()
+                bright = float(frame.mean()) if frame is not None else -1.0
+                director.note(f"vision {lk.fps:.0f} fps, frames {vision.frames}, face {lk.face}, "
+                              f"body {lk.body}, brightness {bright:.0f}")
             if args.seconds and time.time() - director.t0 > args.seconds:
                 break
             await asyncio.sleep(max(0.0, TICK - (time.perf_counter() - t0)))
